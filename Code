@@ -1,0 +1,120 @@
+import psycopg2
+import networkx as nx
+import matplotlib.pyplot as plt
+from node2vec import Node2Vec
+import numpy as np 
+from sklearn import metrics
+from sklearn.cluster import DBSCAN
+
+
+conn = psycopg2.connect(host="localhost", dbname="test", user="ramanbaghel", password="birne", port=5432)
+cur = conn.cursor()
+cur.execute('SELECT Id, PATIENT, START, STOP, DESCRIPTION, REASONDESCRIPTION FROM careplans')
+
+G = nx.Graph()
+
+for row in cur:
+
+        G.add_node(row[0], label=f"ID: {row[0]}")
+        G.add_node(row[1], label=f"PATIENT: {row[1]}")
+        # # Concatenate START and STOP values
+        # date_range_label = f"Date_range: {row[2]} - {row[3]}"
+        # G.add_node(date_range_label)
+
+        G.add_node(row[4], label=f"TREATMENT: {row[4]}")
+        # if row[5] is not None:
+        #  G.add_node(row[5], label=f"DIAGNOSE: {row[5]}")
+        #  G.add_edge(row[0], row[5], label = "diagnose")
+
+        
+        G.add_edge(row[1], row[0], label = "uniqueid")
+        # G.add_edge(row[0], date_range_label, label = "daterange")
+        G.add_edge(row[0], row[4], label = "treatment")
+        
+# cur.execute('SELECT Id, PATIENT, START, STOP, REASONDESCRIPTION FROM encounters LIMIT 20' )
+
+# for row in cur:
+#      G.add_node(row[0], label=f"ID2:{row[0]}")
+#      G.add_node(row[0], label=f"PATIENT: {row[1]}")
+#      date_range_label = f"Date_range: {row[2]} - {row[3]}"
+#      G.add_node(date_range_label) 
+#      if row[4] is not None:
+#       G.add_node(row[4], label=f"DIAGNOSE: {row[4]}")
+#       G.add_edge(row[0], row[4], label = "diagnose")
+
+
+#      G.add_edge(row[0], row[1], label = "uniqueid")
+# #      G.add_edge(row[0], date_range_label, label = "daterange")
+
+# treatments = []
+# patient_ids = ["483050f6-2de2-8743-6fea-2fe56a18c08f", "c78a7e4f-592f-2ddc-f755-abb6c34c3d4e"]
+# for pid in patient_ids:
+#     cur.execute('SELECT DESCRIPTION FROM encounters WHERE PATIENT = \'{}\' LIMIT 1'.format(pid) )
+#     for row in cur:
+#         treatments.append(row[0])
+# print(treatments)
+
+# T = "Well child visit (procedure)"
+# patients_with_T = []
+# cur.execute('SELECT PATIENT FROM encounters WHERE DESCRIPTION = \'{}\''.format(T) )
+# for row in cur:
+#     patients_with_T.append(row[0])
+# patients_with_T = set(patients_with_T)
+# print(patients_with_T)
+
+def generate_node2vec_embeddings(graph):
+    node2vec = Node2Vec(graph, dimensions=64, walk_length=60, num_walks=400, workers=1)
+    model = node2vec.fit(window=10, min_count=1)
+    return {node: model.wv[str(node)] for node in graph.nodes()}
+
+embeddings = generate_node2vec_embeddings(G)
+
+# Find the number of nodes in the graph
+node_count = G.number_of_nodes()
+print(f"Number of nodes in the graph: {node_count}")
+
+     
+X = np.array(list(embeddings.values()))
+for eps in [1.5]:
+    for min_samples in [3]:
+        db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
+        labels = db.labels_
+        core_indices = db.core_sample_indices_
+        # Identify core points and noise points
+        core_points = X[core_indices]
+        noise_points = X[labels == -1]
+        unique_labels = np.unique(labels)
+        n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+        n_noise_ = list(labels).count(-1)
+
+        print(f'Parameters: eps={eps}, min_samples={min_samples}')
+        print(f'Number of clusters: {n_clusters_}')
+        print(f'Number of noise points: {n_noise_}')
+        print(f'Unique labels: {unique_labels}')
+        print(labels)
+
+
+# Assign colors based on cluster labels
+colors = [label + 1 if label != -1 else 0 for label in labels]
+
+
+# Draw the graph with node colors
+plt.figure(figsize=(25, 25))
+pos = nx.spring_layout(G)
+nx.draw(G, pos, with_labels=True, cmap=plt.cm.Set1, node_size=200, font_size=8, font_color='black', font_weight='bold', node_color='darkgreen', edge_color='black', linewidths=1.5, alpha=0.7)
+# Highlight core points in red
+core_nodes = [list(G.nodes())[i] for i in core_indices]
+nx.draw_networkx_nodes(G, pos, nodelist=core_nodes, node_color='red', node_size=200)
+# nx.draw(G, pos, with_labels=True, node_color=colors, cmap=plt.cm.Set1, node_size=200)
+edge_labels = {(u, v): G[u][v].get('label', '') for u, v in G.edges()}
+nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8, font_color='violet', label_pos=0.5)
+
+
+# plt.savefig(f"graph_eps_{1.5}_min_samples_{3}.png", format="PNG", dpi=100)
+plt.savefig("graph.png", format="PNG", dpi=100)
+plt.show(block=False)
+
+
+conn.commit()
+cur.close()
+conn.close()

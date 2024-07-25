@@ -1,4 +1,5 @@
 import psycopg2
+import logging 
 import networkx as nx
 import matplotlib.pyplot as plt
 from node2vec import Node2Vec
@@ -6,29 +7,35 @@ import numpy as np
 from sklearn import metrics
 from sklearn.cluster import DBSCAN
 
+logging.basicConfig(filename='script_log.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+logging.info("Starting the script")
 
 conn = psycopg2.connect(host="localhost", dbname="test", user="ramanbaghel", password="birne", port=5432)
 cur = conn.cursor()
+logging.info("connected to the database")
 cur.execute('SELECT Id, PATIENT, START, STOP, DESCRIPTION, REASONDESCRIPTION FROM careplans')
 
 G = nx.Graph()
+all_patient_ids = [] # List of all patient IDs in the graph
 
 for row in cur:
-
         G.add_node(row[0], label=f"ID: {row[0]}")
         G.add_node(row[1], label=f"PATIENT: {row[1]}")
-        # # Concatenate START and STOP values
-        # date_range_label = f"Date_range: {row[2]} - {row[3]}"
-        # G.add_node(date_range_label)
+
+        all_patient_ids.append(row[1])
+        # Concatenate START and STOP values
+        date_range_label = f"Date_range: {row[2]} - {row[3]}"
+        G.add_node(date_range_label)
 
         G.add_node(row[4], label=f"TREATMENT: {row[4]}")
-        # if row[5] is not None:
-        #  G.add_node(row[5], label=f"DIAGNOSE: {row[5]}")
-        #  G.add_edge(row[0], row[5], label = "diagnose")
+        if row[5] is not None:
+         G.add_node(row[5], label=f"DIAGNOSE: {row[5]}")
+         G.add_edge(row[0], row[5], label = "diagnose")
 
         
         G.add_edge(row[1], row[0], label = "uniqueid")
-        # G.add_edge(row[0], date_range_label, label = "daterange")
+        G.add_edge(row[0], date_range_label, label = "daterange")
         G.add_edge(row[0], row[4], label = "treatment")
         
 # cur.execute('SELECT Id, PATIENT, START, STOP, REASONDESCRIPTION FROM encounters LIMIT 20' )
@@ -44,23 +51,36 @@ for row in cur:
 
 
 #      G.add_edge(row[0], row[1], label = "uniqueid")
-# #      G.add_edge(row[0], date_range_label, label = "daterange")
+#      G.add_edge(row[0], date_range_label, label = "daterange")
 
-# treatments = []
-# patient_ids = ["483050f6-2de2-8743-6fea-2fe56a18c08f", "c78a7e4f-592f-2ddc-f755-abb6c34c3d4e"]
-# for pid in patient_ids:
-#     cur.execute('SELECT DESCRIPTION FROM encounters WHERE PATIENT = \'{}\' LIMIT 1'.format(pid) )
-#     for row in cur:
-#         treatments.append(row[0])
-# print(treatments)
 
-# T = "Well child visit (procedure)"
-# patients_with_T = []
-# cur.execute('SELECT PATIENT FROM encounters WHERE DESCRIPTION = \'{}\''.format(T) )
-# for row in cur:
-#     patients_with_T.append(row[0])
-# patients_with_T = set(patients_with_T)
-# print(patients_with_T)
+def clusters_from_labels(labels, patient_ids):
+    clusters = dict()
+    for (index, label) in enumerate(labels):
+        if label not in clusters:
+            clusters[label] = []
+        if index < len(patient_ids):    
+         clusters[label].append(patient_ids[index])
+    return clusters
+
+def cluster_score(patient_ids):
+    treatments = []
+    for pid in patient_ids:
+        cur.execute('SELECT DESCRIPTION FROM encounters WHERE PATIENT = \'{}\' LIMIT 1'.format(pid))
+        for row in cur:
+            treatments.append(row[0])
+
+    jaccard_indices = []
+    for T in treatments:
+        patients_with_T = []
+        cur.execute('SELECT PATIENT FROM encounters WHERE DESCRIPTION = \'{}\''.format(T))
+        for row in cur:
+            patients_with_T.append(row[0])
+        jaccard_indices.append(jaccard_index(set(patient_ids), set(patients_with_T)))
+    return sum(jaccard_indices) / len(jaccard_indices)
+
+def jaccard_index(a, b):
+     return len(a.intersection(b)) / len(a.union(b))
 
 def generate_node2vec_embeddings(graph):
     node2vec = Node2Vec(graph, dimensions=64, walk_length=60, num_walks=400, workers=1)
@@ -74,9 +94,11 @@ node_count = G.number_of_nodes()
 print(f"Number of nodes in the graph: {node_count}")
 
      
-X = np.array(list(embeddings.values()))
-for eps in [1.5]:
-    for min_samples in [3]:
+#X = np.array(list(embeddings.values()))
+X = np.array(list([val for idx, val in embeddings.items() if idx in all_patient_ids]))
+patient_ids = [idx for idx in embeddings.keys() if idx in all_patient_ids]
+for eps in [0.1, 3.0, 10]:
+    for min_samples in [2, 10]:
         db = DBSCAN(eps=eps, min_samples=min_samples).fit(X)
         labels = db.labels_
         core_indices = db.core_sample_indices_
@@ -92,6 +114,11 @@ for eps in [1.5]:
         print(f'Number of noise points: {n_noise_}')
         print(f'Unique labels: {unique_labels}')
         print(labels)
+
+        clusters = clusters_from_labels(labels, patient_ids)
+        for cluster_id, patient_ids in clusters.items():
+            print(f'Cluster {cluster_id}: {patient_ids}')
+            print(f'Cluster score: {cluster_score(patient_ids)}')
 
 
 # Assign colors based on cluster labels
